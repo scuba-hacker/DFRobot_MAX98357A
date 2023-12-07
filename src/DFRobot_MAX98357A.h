@@ -1,7 +1,7 @@
 /*!
  * @file  DFRobot_MAX98357A.h
  * @brief  Define infrastructure of DFRobot_MAX98357A class
- * @details  Configure a classic Bluetooth, pair with Bluetooth devices, receive Bluetooth audio, 
+ * @details  Configure a classic Bluetooth, pair with Bluetooth devices, receive Bluetooth audio,
  * @n        Process simple audio signal, and pass it into the amplifier using I2S communication
  * @copyright  Copyright (c) 2010 DFRobot Co.Ltd (http://www.dfrobot.com)
  * @license  The MIT License (MIT)
@@ -15,23 +15,24 @@
 
 #include <Arduino.h>
 
-#include <esp_bt_main.h>
-#include <esp_bt_device.h>
-#include <esp_gap_bt_api.h>
-#include <esp_a2dp_api.h>
-#include "esp_avrc_api.h"
-
 #include <driver/i2s.h>
 
 #include "Biquad.h"   // Code from https://www.earlevel.com/main/2012/11/26/biquad-c-source-code/ . Thank you very much!
 
 #include "SD.h"
 
-// #define ENABLE_DBG   //!< Open this macro and you can see the details of the program
+#define ENABLE_DBG   //!< Open this macro and you can see the details of the program
 #ifdef ENABLE_DBG
   #define DBG(...) {Serial.print("[");Serial.print(__FUNCTION__); Serial.print("(): "); Serial.print(__LINE__); Serial.print(" ] "); Serial.println(__VA_ARGS__);}
 #else
   #define DBG(...)
+#endif
+
+//#define ENABLE_DBGF   //!< Open this macro and you can see the details of the program
+#ifdef ENABLE_DBGF
+  #define DBGF(...) {Serial.print("[");Serial.print(__FUNCTION__); Serial.print("(): "); Serial.print(__LINE__); Serial.print(" ] "); Serial.printf(__VA_ARGS__);Serial.println("");}
+#else
+  #define DBGF(...)
 #endif
 
 #define NUMBER_OF_FILTER   ((int)(3))   //!< The number of the cascaded filter
@@ -41,12 +42,10 @@
 #define SD_AMPLIFIER_STOP  ((uint8_t)3)   //!< Playback control of audio in SD card - stop playback
 
 #define MAX98357A_VOICE_FROM_SD ((uint8_t)0)
-#define MAX98357A_VOICE_FROM_BT ((uint8_t)1)
 
 class DFRobot_MAX98357A
 {
 public:
-  static uint8_t remoteAddress[6];   // Store the address of the remote Bluetooth device
 
 public:
 
@@ -62,16 +61,14 @@ public:
   /**
    * @fn begin
    * @brief Init function
-   * @param btName - Name of the created Bluetooth device
    * @param bclk - I2S communication pin number, serial clock (SCK), aka bit clock (BCK)
    * @param lrclk - I2S communication pin number, word select (WS), i.e. command (channel) select, used to switch between left and right channel data
    * @param din - I2S communication pin number, serial data signal (SD), used to transmit audio data in two's complement format
    * @return true on success, false on error
    */
-  bool begin(const char *btName="bluetoothAmplifier", 
-             int bclk=GPIO_NUM_25, 
-             int lrclk=GPIO_NUM_26, 
-             int din=GPIO_NUM_27);
+  bool begin(int bclk=GPIO_NUM_0,
+             int lrclk=GPIO_NUM_1,
+             int din=GPIO_NUM_7);
 
   /**
    * @fn initI2S
@@ -83,13 +80,6 @@ public:
    */
   bool initI2S(int _bclk, int _lrclk, int _din);
 
-  /**
-   * @fn initBluetooth
-   * @brief Initialize bluetooth
-   * @param _btName - Name of the created Bluetooth device
-   * @return true on success, false on error
-   */
-  bool initBluetooth(const char * _btName);
 
   /**
    * @fn initSDCard
@@ -97,7 +87,7 @@ public:
    * @param csPin cs pin number for spi communication of SD card module
    * @return true on success, false on error
    */
-  bool initSDCard(uint8_t csPin=GPIO_NUM_5);
+  bool initSDCard(uint8_t csPin=GPIO_NUM_2);
 
 /*************************** Function ******************************/
 
@@ -123,7 +113,7 @@ public:
   /**
    * @fn SDPlayerControl
    * @brief SD card music playback control interface
-   * @param CMD - Playback control command: 
+   * @param CMD - Playback control command:
    * @n SD_AMPLIFIER_PLAY: Start to play music, which can be played from the position where you paused before
    * @n   If no music file is selected through playSDMusic(), the first one in the list will be played by default.
    * @n   Playback error may occur if music files are not scanned from SD card in the correct format (only support English for path name of music files and WAV for their format currently)
@@ -132,25 +122,6 @@ public:
    * @return None
    */
   void SDPlayerControl(uint8_t CMD);
-
-  /**
-   * @fn getMetadata
-   * @brief Get "metadata" through AVRC command
-   * @param type - The type of metadata to be obtained, and the parameters currently supported: 
-   * @n     ESP_AVRC_MD_ATTR_TITLE   ESP_AVRC_MD_ATTR_ARTIST   ESP_AVRC_MD_ATTR_ALBUM
-   * @return The corresponding type of "metadata"
-   */
-  String getMetadata(uint8_t type);
-
-  /**
-   * @fn getRemoteAddress
-   * @brief Get the address of the remote Bluetooth device
-   * @note The address will be obtained after the module is paired with the remote Bluetooth device and successfully communicates with it based on the Bluetooth AVRCP protocol.
-   * @return Return the array pointer storing the address of the remote Bluetooth device
-   * @n Return None when the module does not connect to the remote device or failed to communicate with it based on the Bluetooth AVRCP protocol.
-   * @n AVRCP(Audio Video Remote Control Profile)
-   */
-  uint8_t * getRemoteAddress(void);
 
   /**
    * @fn setVolume
@@ -185,6 +156,10 @@ public:
    * @return None
    */
   void reverseLeftRightChannels(void);
+
+  uint8_t getAmplifierState() const;
+  uint8_t getTrackCount() const;
+  const char* getTrackFilename(const uint8_t trackIndex);
 
 protected:
 
@@ -228,7 +203,7 @@ protected:
 
   /**
    * @fn audioDataProcessCallback
-   * @brief esp_a2d_sink_register_data_callback() function, 
+   * @brief esp_a2d_sink_register_data_callback() function,
    * @n     Process the audio stream data of Bluetooth A2DP protocol communication
    * @param data - The audio data from the remote Bluetooth device
    * @param len - Byte length of audio data
@@ -238,26 +213,6 @@ protected:
   static void audioDataProcessCallback(const uint8_t *data, uint32_t len);
 
   /**
-   * @fn filterToWork
-   * @brief esp_a2d_register_callback() function, used to process the event of Bluetooth A2DP protocol communication
-   * @param event - Type of the triggered A2DP event
-   * @param param - The parameter information corresponding to the event
-   * @return None
-   * @note Because of some factors like action scope, the function should be static. Therefore it is shared by multiple objects of the class.
-   */
-  static void a2dpCallback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param);
-
-  /**
-   * @fn avrcCallback
-   * @brief esp_avrc_ct_register_callback() function, used to process the event of Bluetooth AVRC protocol communication
-   * @param event - Type of the triggered AVRC event
-   * @param param - The parameter information corresponding to the event
-   * @return None
-   * @note Because of some factors like action scope, the function should be static. Therefore it is shared by multiple objects of the class.
-   */
-  static void avrcCallback(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param);
-
-  /**
    * @fn playWAV
    * @brief The parsing play function for audio files in WAV format
    * @param arg - Corresponding parameter information
@@ -265,6 +220,7 @@ protected:
    * @note Because of some factors like action scope, the function should be static. Therefore it is shared by multiple objects of the class.
    */
   static void playWAV(void *arg);
+
 
 private:
 

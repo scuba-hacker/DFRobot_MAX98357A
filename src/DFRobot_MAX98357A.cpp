@@ -1,7 +1,7 @@
 /*!
  * @file  DFRobot_MAX98357A.cpp
  * @brief  Define the infrastructure DFRobot_MAX98357A class
- * @details  Configure a classic Bluetooth, pair with Bluetooth devices, receive Bluetooth audio, 
+ * @details  Configure a classic Bluetooth, pair with Bluetooth devices, receive Bluetooth audio,
  * @n        Process simple audio signal, and pass it into the amplifier using I2S communication
  * @copyright  Copyright (c) 2010 DFRobot Co.Ltd (http://www.dfrobot.com)
  * @license  The MIT License (MIT)
@@ -12,16 +12,11 @@
  */
 #include "DFRobot_MAX98357A.h"
 
-uint8_t DFRobot_MAX98357A::remoteAddress[6];   // Address of the connected remote Bluetooth device
-
 float _volume = 1.0;   // Change the coefficient of audio signal volume
 int32_t _sampleRate = 44100;   // I2S communication frequency
-bool _avrcConnected = false;   // AVRC connection status
 bool _filterFlag = false;   // Filter enabling flag
 
-String _metadata = "";   // metadata
-uint8_t _metaFlag = 0;   // metadata refresh flag
-uint8_t _voiceSource = MAX98357A_VOICE_FROM_BT;   // The audio source, used to correct left and right audio
+uint8_t _voiceSource = MAX98357A_VOICE_FROM_SD;   // The audio source, used to correct left and right audio
 
 Biquad _filterLLP[NUMBER_OF_FILTER];   // Left channel low-pass filter
 Biquad _filterRLP[NUMBER_OF_FILTER];   // Right channel low-pass filter
@@ -73,17 +68,30 @@ DFRobot_MAX98357A::DFRobot_MAX98357A()
 {
 }
 
-bool DFRobot_MAX98357A::begin(const char *btName, int bclk, int lrclk, int din)
+uint8_t DFRobot_MAX98357A::getAmplifierState() const
+{
+	return SDAmplifierMark;
+}
+
+uint8_t DFRobot_MAX98357A::getTrackCount() const
+{
+	return musicCount;
+}
+
+const char* DFRobot_MAX98357A::getTrackFilename(const uint8_t trackIndex)
+{
+	if (trackIndex < musicCount)
+		return _musicList[trackIndex].c_str();
+	else
+		return NULL;
+}
+
+
+bool DFRobot_MAX98357A::begin(int bclk, int lrclk, int din)
 {
   // Initialize I2S
   if (!initI2S(bclk, lrclk, din)){
     DBG("Initialize I2S failed !");
-    return false;
-  }
-
-  // Initialize bluetooth
-  if (!initBluetooth(btName)){
-    DBG("Initialize bluetooth failed !");
     return false;
   }
 
@@ -98,11 +106,6 @@ bool DFRobot_MAX98357A::begin(const char *btName, int bclk, int lrclk, int din)
 
 void DFRobot_MAX98357A::end(void)
 {
-  ESP_ERROR_CHECK(esp_avrc_ct_deinit());   // destroy AVRCP
-  ESP_ERROR_CHECK(esp_a2d_sink_deinit());   // destroy A2DP
-  ESP_ERROR_CHECK(esp_bluedroid_disable());   // stop & destroy bluetooth
-  ESP_ERROR_CHECK(esp_bluedroid_deinit());
-  btStop();
   ESP_ERROR_CHECK(i2s_driver_uninstall(I2S_NUM_0));   // stop & destroy i2s driver
 }
 
@@ -110,7 +113,7 @@ bool DFRobot_MAX98357A::initI2S(int _bclk, int _lrclk, int _din)
 {
   static const i2s_config_t i2s_config = {
     .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX),   // The main controller can transmit data but not receive.
-    .sample_rate = _sampleRate,
+    .sample_rate = (uint32_t)_sampleRate,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,   // 16 bits per sample
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,   // 2-channels
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,   // I2S communication I2S Philips standard, data launch at second BCK
@@ -140,64 +143,6 @@ bool DFRobot_MAX98357A::initI2S(int _bclk, int _lrclk, int _din)
   return true;
 }
 
-bool DFRobot_MAX98357A::initBluetooth(const char * _btName)
-{
-  // Initialize bluedroid
-  if (!btStarted() && !btStart()){
-    DBG("Initialize controller failed");
-    return false;
-  }
-  esp_bluedroid_status_t bt_state = esp_bluedroid_get_status();
-  if (bt_state == ESP_BLUEDROID_STATUS_UNINITIALIZED){
-    if (esp_bluedroid_init()) {
-      DBG("Initialize bluedroid failed !");
-      return false;
-    }
-  }
-  if (bt_state != ESP_BLUEDROID_STATUS_ENABLED){
-    if (esp_bluedroid_enable()) {
-      DBG("Enable bluedroid failed !");
-      return false;
-    }
-  }
-  if (esp_bt_dev_set_device_name(_btName)){
-    DBG("Set device name failed !");
-    return false;
-  }
-
-  // Initialize AVRCP
-  if (esp_avrc_ct_init()){
-    DBG("Initialize the bluetooth AVRCP controller module failed !");
-    return false;
-  }
-  if (esp_avrc_ct_register_callback(avrcCallback)){
-    DBG("Register application callbacks to AVRCP module failed !");
-    return false;
-  }
-
-  // Initialize A2DP
-  if (esp_a2d_sink_init()){
-    DBG("Initialize the bluetooth A2DP sink module failed !");
-    return false;
-  }
-  if (esp_a2d_register_callback(a2dpCallback)){
-    DBG("Register application callbacks to A2DP module failed !");
-    return false;
-  }
-  if (esp_a2d_sink_register_data_callback(audioDataProcessCallback)){
-    DBG("Register A2DP sink data output function failed !");
-    return false;
-  }
-
-  // Set discoverability and connectability mode for legacy bluetooth.
-  if (esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE)){
-    DBG("Set discoverability and connectability mode for legacy bluetooth failed !");
-    return false;
-  }
-  _voiceSource = MAX98357A_VOICE_FROM_BT;
-
-  return true;
-}
 
 bool DFRobot_MAX98357A::initSDCard(uint8_t csPin)
 {
@@ -233,6 +178,15 @@ bool DFRobot_MAX98357A::initSDCard(uint8_t csPin)
   SDAmplifierMark = SD_AMPLIFIER_STOP;
   xTaskCreate(&playWAV, "playWAV", 2048, NULL, 5, &xPlayWAV);
 
+  if (xPlayWAV == NULL)
+  {
+	DBG("xTaskCreate xPlayWAV Failed");
+  }
+  else
+  {
+	DBG("xTaskCreate xPlayWAV Succeeded");
+  }
+
   return true;
 }
 
@@ -240,7 +194,7 @@ bool DFRobot_MAX98357A::initSDCard(uint8_t csPin)
 
 void DFRobot_MAX98357A::reverseLeftRightChannels(void)
 {
-  _voiceSource = (_voiceSource ? MAX98357A_VOICE_FROM_SD : MAX98357A_VOICE_FROM_BT);
+  _voiceSource = MAX98357A_VOICE_FROM_SD;
 }
 
 void DFRobot_MAX98357A::listDir(fs::FS &fs, const char * dirName)
@@ -293,40 +247,21 @@ void DFRobot_MAX98357A::scanSDMusic(String * musicList)
 void DFRobot_MAX98357A::playSDMusic(const char *musicName)
 {
   SDPlayerControl(SD_AMPLIFIER_STOP);
+  Serial.println("DFRobot_MAX98357A::playSDMusic   SD_AMPLIFIER_STOP called");
   char SDName[80]="/sd";   // The default SD card mount point in SD.h
   strcat(SDName, musicName);   // It need to be an absolute path.
+  Serial.println("DFRobot_MAX98357A::playSDMusic   strcat called");
   strcpy(fileName, SDName);
+  Serial.println("DFRobot_MAX98357A::playSDMusic   strcpy called");
   SDPlayerControl(SD_AMPLIFIER_PLAY);
+  Serial.println("DFRobot_MAX98357A::playSDMusic   SD_AMPLIFIER_PLAY called");
 }
 
 void DFRobot_MAX98357A::SDPlayerControl(uint8_t CMD)
 {
   SDAmplifierMark = CMD;
+  Serial.println("DFRobot_MAX98357A::SDPlayerControl   SDAmplifierMark == CMD completed");
   delay(10);   // Wait music playback to stop
-}
-
-String DFRobot_MAX98357A::getMetadata(uint8_t type)
-{
-  _metadata = "";
-  if(_avrcConnected){
-    esp_avrc_ct_send_metadata_cmd(type, type);   // Request metadata from remote Bluetooth device via AVRC command
-    for(uint8_t i=0; i<20; i++){   // Wait response
-      if(0 != _metaFlag){
-        break;
-      }
-      delay(100);
-    }
-    _metaFlag = 0;
-  }
-  return _metadata;
-}
-
-uint8_t * DFRobot_MAX98357A::getRemoteAddress(void)
-{
-  if(!_avrcConnected){   // Bluetooth AVRC is not connected
-    return NULL;
-  }
-  return remoteAddress;
 }
 
 void DFRobot_MAX98357A::setVolume(float vol)
@@ -383,101 +318,6 @@ int16_t DFRobot_MAX98357A::filterToWork(Biquad * filterHP, Biquad * filterLP, fl
 
 /*************************** Function ******************************/
 
-void DFRobot_MAX98357A::a2dpCallback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t*param)
-{
-  esp_a2d_cb_param_t *a2d = (esp_a2d_cb_param_t *)(param);
-
-  switch (event) {
-    /*!<
-     * Audio codec is configured, only used for A2DP SINK
-     *
-     * @brief ESP_A2D_AUDIO_CFG_EVT
-     *
-     * struct a2d_audio_cfg_param {
-     *     esp_bd_addr_t remote_bda;              /*!< remote bluetooth device address
-     *     esp_a2d_mcc_t mcc;                     /*!< A2DP media codec capability information
-     * } audio_cfg;                               /*!< media codec configuration information
-     */
-    case ESP_A2D_AUDIO_CFG_EVT:
-    /*!<
-     * Connection state changed event
-     *
-     * @brief  ESP_A2D_CONNECTION_STATE_EVT
-     *
-     * struct a2d_conn_stat_param {
-     *     esp_a2d_connection_state_t state;      /*!< one of values from esp_a2d_connection_state_t
-     *     esp_bd_addr_t remote_bda;              /*!< remote bluetooth device address
-     *     esp_a2d_disc_rsn_t disc_rsn;           /*!< reason of disconnection for "DISCONNECTED"
-     * } conn_stat;                               /*!< A2DP connection status
-     */
-    case ESP_A2D_CONNECTION_STATE_EVT:
-    /*!< audio stream transmission state changed event */
-    case ESP_A2D_AUDIO_STATE_EVT:
-    /*!< acknowledge event in response to media control commands */
-    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
-    /*!< indicate a2dp init&deinit complete */
-    case ESP_A2D_PROF_STATE_EVT:
-      break;
-    default:
-      // "a2dp invalid cb event: %d", event
-      break;
-  }
-}
-
-void DFRobot_MAX98357A::avrcCallback(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
-{
-  esp_avrc_ct_cb_param_t *rc = (esp_avrc_ct_cb_param_t *)(param);
-
-  switch (event) {
-    /*!< metadata response event */
-    case ESP_AVRC_CT_METADATA_RSP_EVT: {
-        char *attr_text = (char *) malloc (rc->meta_rsp.attr_length + 1);
-        memcpy(attr_text, rc->meta_rsp.attr_text, rc->meta_rsp.attr_length);
-        attr_text[rc->meta_rsp.attr_length] = 0;
-        _metadata = String(attr_text);
-        _metaFlag = rc->meta_rsp.attr_id;
-        DBG("_metadata");
-        DBG(_metadata);
-        DBG(rc->meta_rsp.attr_id);
-
-        free(attr_text);
-        break;
-      }
-    /*!< connection state changed event */
-    case ESP_AVRC_CT_CONNECTION_STATE_EVT:{
-        /*!< connection established */
-        _avrcConnected = rc->conn_stat.connected;
-        if(_avrcConnected){
-          uint8_t * p = rc->conn_stat.remote_bda;
-          for(uint8_t i=0; i<6; i++){
-            remoteAddress[i] = *(p + i);
-            DBG(remoteAddress[i], HEX);
-          }
-        /*!< disconnecting remote device */
-        }else{
-          DBG(sizeof(remoteAddress));
-          memset(remoteAddress, 0, 6);
-        }
-        break;
-      }
-    /*!< passthrough response event */
-    case ESP_AVRC_CT_PASSTHROUGH_RSP_EVT:
-    /*!< notification event */
-    case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
-    /*!< feature of remote device indication event */
-    case ESP_AVRC_CT_REMOTE_FEATURES_EVT:
-    /*!< supported notification events capability of peer device */
-    case ESP_AVRC_CT_GET_RN_CAPABILITIES_RSP_EVT:
-    /*!< play status response event */
-    case ESP_AVRC_CT_PLAY_STATUS_RSP_EVT:
-    /*!< set absolute volume response event */
-    case ESP_AVRC_CT_SET_ABSOLUTE_VOLUME_RSP_EVT:
-      break;
-    default:
-      // "unhandled AVRC event: %d", event
-      break;
-  }
-}
 
 void DFRobot_MAX98357A::audioDataProcessCallback(const uint8_t *data, uint32_t len)
 {
@@ -486,121 +326,271 @@ void DFRobot_MAX98357A::audioDataProcessCallback(const uint8_t *data, uint32_t l
   int count = len / 4;   // The number of audio data to be processed in int16_t[2]
   size_t i2s_bytes_write = 0;   // i2s_write() the variable storing the number of data to be written
 
-  if(!_filterFlag){   // Change sample data only according to volume multiplier
-    for(int i=0; i<count; i++){
+_filterFlag = false; // MBJ MBJ
+
+  if(!_filterFlag)
+  {   // Change sample data only according to volume multiplier
+    for(int i=0; i<count; i++)
+	{
       processedData[0+_voiceSource] = (int16_t)((*data16) * _volume);   // Change audio data volume of left channel
-      DBG(processedData[0], HEX);
+//      DBG(processedData[0], HEX);
       data16++;
 
       processedData[1-_voiceSource] = (int16_t)((*data16) * _volume);   // Change audio data volume of right channel
-      DBG(processedData[1], HEX);
+  //    DBG(processedData[1], HEX);
       data16++;
 
       i2s_write(I2S_NUM_0,  processedData, 4, &i2s_bytes_write, 20);   // Transfer audio data to the amplifier via I2S
     }
-  }else{   // Filtering with a simple digital filter
-    for(int i=0; i<count; i++){
-      processedData[0+_voiceSource] = filterToWork(_filterLHP, _filterLLP, ((*data16) * _volume));   // Change audio data volume of left channel, and perform filtering operation
+  }
+  else
+  {   // Filtering with a simple digital filter
+    for(int i=0; i<count; i++)
+	{
+//      processedData[0+_voiceSource] = filterToWork(_filterLHP, _filterLLP, ((*data16) * _volume));   // Change audio data volume of left channel, and perform filtering operation
       data16++;
 
-      processedData[1-_voiceSource] = filterToWork(_filterRHP, _filterRLP, ((*data16) * _volume));   // Change audio data volume of right channel, and perform filtering operation
+  //    processedData[1-_voiceSource] = filterToWork(_filterRHP, _filterRLP, ((*data16) * _volume));   // Change audio data volume of right channel, and perform filtering operation
       data16++;
 
       i2s_write(I2S_NUM_0, processedData, 4, &i2s_bytes_write, 100);   // Transfer audio data to the amplifier via I2S
     }
   }
+
 }
 
 void DFRobot_MAX98357A::playWAV(void *arg)
 {
+  DBG("playWAV: task and method started");
+
   while(1){
-    while(SD_AMPLIFIER_STOP == SDAmplifierMark){
+    while(SD_AMPLIFIER_STOP == SDAmplifierMark)
+	{
       vTaskDelay(100);
     }
 
+	DBG("playWAV: SD_AMPLIFIER_STOP not true, PLAY started");
+
+
     sWavInfo_t * wav = (sWavInfo_t *)calloc(1, sizeof(sWavInfo_t));
-    if(wav == NULL){
-      DBG("Unable to allocate WAV struct.");
+
+	DBG("playWAV: allocated sWavInfo struct");
+
+    if(wav == NULL)
+	{
+      DBG("playWAV: Unable to allocate WAV struct.");
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;
     }
+	else
+	{
+		DBG("playWAV: allocated sWavInfo struct");
+	}
 
     wav->fp = fopen(fileName, "rb");
-    if(wav->fp == NULL){
-      DBG("Unable to open wav file.");
+
+	if(wav->fp == NULL)
+	{
+      DBG("playWAV: Unable to open wav file.");
       DBG(fileName);
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;
     }
-    if(fread(&(wav->header.riffType), 1, 4, wav->fp) != 4){
-      DBG("couldn't read RIFF_ID.");
+	else
+	{
+		DBG("playWAV: opened wav file");
+	}
+
+    if(fread(&(wav->header.riffType), 1, 4, wav->fp) != 4)
+	{
+      DBG("playWAV: couldn't read RIFF_ID.");
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;  /* bad error "couldn't read RIFF_ID" */
     }
-    if(strncmp("RIFF", wav->header.riffType, 4)){
-      DBG("RIFF descriptor not found.") ;
+	else
+	{
+		DBG("playWAV: read RIFF_ID ok");
+	}
+
+    if(strncmp("RIFF", wav->header.riffType, 4))
+	{
+      DBG("playWAV: RIFF descriptor not found.") ;
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;
     }
+	else
+	{
+		DBG("playWAV: read RIFF descriptor ok");
+	}
+
+
     fread(&(wav->header.riffSize), 4, 1, wav->fp);
-    if(fread(&wav->header.waveType, 1, 4, wav->fp) != 4){
-      DBG("couldn't read format");
+
+	DBG("playWAV: read header.riffSize bytes from wav file  ok");
+
+    if(fread(&wav->header.waveType, 1, 4, wav->fp) != 4)
+	{
+      DBG("playWAV: couldn't read format");
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;  /* bad error "couldn't read format" */
     }
+	else
+	{
+		DBG("playWAV: read format ok");
+	}
+
     if(strncmp("WAVE", wav->header.waveType, 4)){
-      DBG("WAVE chunk ID not found.") ;
+      DBG("playWAV: WAVE chunk ID not found.") ;
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;
     }
-    if(fread(&(wav->header.formatType), 1, 4, wav->fp) != 4){
-      DBG("couldn't read format_ID");
+	else
+	{
+		DBG("playWAV: WAVE chunk ID found ok");
+	}
+
+
+	    char                  riffType[4];
+    unsigned int          riffSize;
+    char                  waveType[4];
+    char                  formatType[4];
+    unsigned int          formatSize;
+    uint16_t              compressionCode;
+    i2s_channel_t         numChannels;
+    uint32_t              sampleRate;
+    unsigned int          bytesPerSecond;
+    unsigned short        blockAlign;
+    i2s_bits_per_sample_t bitsPerSample;
+    char                  dataType1[1];
+    char                  dataType2[3];
+    unsigned int          dataSize;
+    char                  data[800];
+
+
+    if(fread(&(wav->header.formatType), 1, 4, wav->fp) != 4)
+	{
+      DBG("playWAV: couldn't read format_ID");
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;  /* bad error "couldn't read format_ID" */
     }
-    if(strncmp("fmt", wav->header.formatType, 3)){
-      DBG("fmt chunk format not found.");
+	else
+	{
+		DBGF("playWAV: successful read format_ID %c%c%c%c%c",formatType[0],formatType[1],formatType[2],formatType[3]);
+	}
+
+    if(strncmp("fmt", wav->header.formatType, 3))
+	{
+      DBG("playWAV: fmt chunk format not found.");
       SDAmplifierMark = SD_AMPLIFIER_STOP;
       continue;
     }
+	else
+	{
+		DBG("playWAV: successful fmt chunk format found:");
+	}
+
     fread(&(wav->header.formatSize), 4, 1, wav->fp);
+	DBGF("playWAV: read wav->header.formatSize ok %ld",wav->header.formatSize);
     fread(&(wav->header.compressionCode), 2, 1, wav->fp);
+	DBGF("playWAV: read wav->header.compressionCode. ok %hu",wav->header.compressionCode);
     fread(&(wav->header.numChannels), 2, 1, wav->fp);
+	DBGF("playWAV: read wav->header.numChannels. ok %d",wav->header.numChannels);
     fread(&(wav->header.sampleRate), 4, 1, wav->fp);
+	DBGF("playWAV: read wav->header.sampleRate ok %lu",wav->header.sampleRate);
     fread(&(wav->header.bytesPerSecond), 4, 1, wav->fp);
+	DBGF("playWAV: read wav->header.bytesPerSecond ok %ld",wav->header.bytesPerSecond);
     fread(&(wav->header.blockAlign), 2, 1, wav->fp);
+	DBGF("playWAV: read wav->header.blockAlign ok %hu", wav->header.blockAlign);
     fread(&(wav->header.bitsPerSample), 2, 1, wav->fp);
-    while(1){
-      if(fread(&wav->header.dataType1, 1, 1, wav->fp) != 1){
-        DBG("Unable to read data chunk ID.");
+	DBGF("playWAV: read wav->header.bitsPerSample ok %d", wav->header.bitsPerSample);
+
+    while(1)
+	{
+      if(fread(&wav->header.dataType1, 1, 1, wav->fp) != 1)
+	  {
+  //      DBG("playWAV: Unable to read data chunk ID.");
         free(wav);
         break;
       }
-      if(strncmp("d", wav->header.dataType1, 1) == 0){
+	  else
+	  {
+//	  	DBG("playWAV: Read data chunk ID ok");
+	  }
+
+      if(strncmp("d", wav->header.dataType1, 1) == 0)
+	  {
         fread(&wav->header.dataType2, 3, 1, wav->fp);
-        if(strncmp("ata", wav->header.dataType2, 3) == 0){
+//      	DBG("playWAV: Read data chunk ok");
+	    if(strncmp("ata", wav->header.dataType2, 3) == 0)
+		{
           fread(&(wav->header.dataSize),4,1,wav->fp);
           break;
         }
       }
+
     }
 
     i2s_set_sample_rates(I2S_NUM_0, wav->header.sampleRate);   // Set I2S sampling rate based on the parsed audio sampling frequency
+	DBG("playWAV: i2s_set_sample_rates ok");
 
-    while(fread(&wav->header.data, 1 , 800 , wav->fp)){
-      audioDataProcessCallback((uint8_t *)&wav->header.data, 800);   // Send the parsed audio data to the amplifier broadcast function
-      if(SD_AMPLIFIER_STOP == SDAmplifierMark){
+	DBG("playWAV: attempt single fread of 800 bytes");
+
+	if (wav == NULL)
+	{
+		DBG("playWAV: wav pointer is NULL");
+	}
+	else
+	{
+		DBG("playWAV: wav pointer is Good not-null");
+	}
+
+	void* header_data_p = &wav->header.data;
+
+	if (header_data_p == NULL)
+	{
+		DBG("playWAV: wav->header.data pointer is NULL");
+	}
+	else
+	{
+		DBG("playWAV: wav->header.data pointer=is Good not-null");
+	}
+
+	FILE* stream = wav->fp;
+
+	if (stream == NULL)
+	{
+		DBG("playWAV: file stream pointer is NULL");
+	}
+	else
+	{
+		DBG("playWAV: file stream pointer is Good not-null");
+	}
+
+    while(fread(&wav->header.data, 1 , 800 , wav->fp))
+	{
+//	DBG("playWAV: fread while loop: read data chunk from wav file ok\n");
+     audioDataProcessCallback((uint8_t *)&wav->header.data, 800);   // Send the parsed audio data to the amplifier broadcast function
+// 	 DBG("playWAV: audioDataProcessCallback call ok");
+
+	  if(SD_AMPLIFIER_STOP == SDAmplifierMark)
+	  {
         break;
       }
-      while(SD_AMPLIFIER_PAUSE == SDAmplifierMark){
+      while(SD_AMPLIFIER_PAUSE == SDAmplifierMark)
+	  {
         vTaskDelay(100);
       }
     }
 
+ 	DBG("playWAV: while loop finished");
+
     fclose(wav->fp);
+	DBG("playWAV: closed file ok");
     free(wav);
+	DBG("playWAV: freed wav memory");
     SDAmplifierMark = SD_AMPLIFIER_STOP;
     vTaskDelay(100);
   }
+
   vTaskDelete(xPlayWAV);
 }
